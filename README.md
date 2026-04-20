@@ -18,6 +18,7 @@ API REST de autenticação stateless construída com **Spring Boot 4**, **Java 2
 - [Tratamento de Erros](#tratamento-de-erros)
 - [Testes](#testes)
 - [Documentação Interativa (Swagger)](#documentação-interativa-swagger)
+- [Docker](#docker)
 
 ---
 
@@ -43,7 +44,10 @@ API REST de autenticação stateless construída com **Spring Boot 4**, **Java 2
 - **Registro de usuário** com e-mail, senha (BCrypt) e papel (`ADMIN` ou `USER`)
 - **Login** com geração de *access token* (JWT) e *refresh token*
 - **Renovação de token** via *refresh token* com rotação automática (o token antigo é invalidado e um novo é emitido)
+- **Logout** com invalidação do refresh token e limpeza do cookie
+- **Refresh token via cookie HttpOnly** — protegido contra XSS; nunca exposto ao JavaScript
 - **Autenticação stateless** — sem sessão no servidor, baseada exclusivamente em JWT
+- **CORS configurável** para integração com frontends
 - **Controle de acesso por papéis** — `ROLE_USER` e `ROLE_ADMIN`
 - **Auditoria automática** de criação e última modificação nos registros de usuário (`createdAt`, `updatedAt`)
 - **Tratamento global de erros** padronizado no formato RFC 9457 (*Problem Details*)
@@ -59,11 +63,10 @@ src/main/java/com/auth/jwt_api/
 │   ├── JpaAuditingConfig.java        # Habilita auditoria JPA
 │   └── OpenApiConfig.java            # Configuração do Swagger/OpenAPI
 ├── controllers/
-│   └── AuthController.java           # Endpoints: /auth/login, /auth/register, /auth/refresh
+│   └── AuthController.java           # Endpoints: /auth/login, /auth/register, /auth/refresh, /auth/logout
 ├── dtos/
 │   ├── AuthenticationRequestDTO.java # Payload de login (email + senha)
-│   ├── LoginResponseDTO.java         # Resposta com accessToken + refreshToken
-│   ├── RefreshTokenRequestDTO.java   # Payload para renovação de token
+│   ├── LoginResponseDTO.java         # Resposta com accessToken + tokenType + expiresIn
 │   └── RegisterRequestDTO.java       # Payload de registro (email + senha + role)
 ├── exceptions/
 │   ├── BusinessException.java        # Exceção base de negócio
@@ -124,6 +127,9 @@ spring.datasource.password=postgres
 api.security.token.secret=${JWT_SECRET:my-secret-key-for-dev-only-32chars!!}
 api.security.token.expiration=7200000          # 2 horas (em ms)
 api.security.token.refresh-expiration=604800000 # 7 dias (em ms)
+
+# CORS (separar múltiplas origens por vírgula)
+app.cors.allowed-origins=http://localhost:3000
 
 server.port=8081
 ```
@@ -191,31 +197,38 @@ Todos os endpoints abaixo estão sob o prefixo `/auth`.
 **Resposta de sucesso:** `200 OK`
 ```json
 {
-  "token": "eyJhbGciOiJIUzI1NiJ9...",
-  "refreshToken": "550e8400-e29b-41d4-a716-446655440000"
+  "accessToken": "eyJhbGciOiJIUzI1NiJ9...",
+  "tokenType": "Bearer",
+  "expiresIn": 7200
 }
 ```
+
+> O *refresh token* é enviado automaticamente como cookie `HttpOnly` (não aparece no corpo da resposta). O cookie possui as flags `HttpOnly`, `Secure`, `SameSite=Lax` e path `/auth`.
 
 ---
 
 ### `POST /auth/refresh` — Renovar access token
 
-**Corpo da requisição:**
-```json
-{
-  "refreshToken": "550e8400-e29b-41d4-a716-446655440000"
-}
-```
+> O refresh token é lido automaticamente do cookie `HttpOnly` definido no login. Não é necessário enviar corpo na requisição.
 
 **Resposta de sucesso:** `200 OK`
 ```json
 {
-  "token": "eyJhbGciOiJIUzI1NiJ9...",
-  "refreshToken": "novo-refresh-token-uuid"
+  "accessToken": "eyJhbGciOiJIUzI1NiJ9...",
+  "tokenType": "Bearer",
+  "expiresIn": 7200
 }
 ```
 
-> O refresh token anterior é invalidado imediatamente (rotação automática).
+> O refresh token anterior é invalidado imediatamente (rotação automática). Um novo cookie `HttpOnly` é definido na resposta.
+
+---
+
+### `POST /auth/logout` — Encerrar sessão
+
+> Lê o cookie `refreshToken` (se presente), invalida o token no banco e apaga o cookie da resposta.
+
+**Resposta de sucesso:** `204 No Content`
 
 ---
 
@@ -227,30 +240,41 @@ Para acessar qualquer endpoint que exija autenticação, envie o *access token* 
 Authorization: Bearer <access_token>
 ```
 
+> O cookie de refresh token é gerenciado automaticamente pelo navegador ou cliente HTTP (ex.: `credentials: 'include'` em `fetch`). Não é necessário manipulá-lo manualmente.
+
 ---
 
 ## Fluxo de Autenticação
 
 ```
-Cliente                       Servidor
-  │                              │
-  │── POST /auth/login ─────────►│
-  │                              │  Valida credenciais (BCrypt)
-  │                              │  Gera accessToken (JWT, 2h)
-  │                              │  Gera refreshToken (UUID, 7d)
-  │◄── 200 { token, refreshToken}│
-  │                              │
-  │── GET /recurso-protegido ───►│
-  │   Authorization: Bearer JWT  │  Filtra JWT → extrai e-mail
-  │                              │  Carrega usuário → autentica contexto
-  │◄── 200 OK ──────────────────│
-  │                              │
-  │  (access token expirado)     │
-  │── POST /auth/refresh ───────►│
-  │   { refreshToken }           │  Valida refresh token + expiração
-  │                              │  Gera novo accessToken + novo refreshToken
-  │                              │  Invalida refresh token antigo
-  │◄── 200 { token, refreshToken}│
+Cliente                              Servidor
+  │                                     │
+  │── POST /auth/login ────────────────►│
+  │                                     │  Valida credenciais (BCrypt)
+  │                                     │  Gera accessToken (JWT, 2h)
+  │                                     │  Gera refreshToken (UUID, 7d)
+  │◄── 200 { accessToken, tokenType,    │
+  │         expiresIn }                 │
+  │    Set-Cookie: refreshToken=...     │  Cookie HttpOnly, Secure, SameSite=Lax
+  │                                     │
+  │── GET /recurso-protegido ──────────►│
+  │   Authorization: Bearer JWT         │  Filtra JWT → extrai e-mail
+  │                                     │  Carrega usuário → autentica contexto
+  │◄── 200 OK ─────────────────────────│
+  │                                     │
+  │  (access token expirado)            │
+  │── POST /auth/refresh ──────────────►│
+  │   Cookie: refreshToken=<uuid>       │  Valida refresh token + expiração
+  │                                     │  Gera novo accessToken + novo refreshToken
+  │                                     │  Invalida refresh token antigo
+  │◄── 200 { accessToken, tokenType,    │
+  │         expiresIn }                 │
+  │    Set-Cookie: refreshToken=novo    │
+  │                                     │
+  │── POST /auth/logout ───────────────►│
+  │   Cookie: refreshToken=<uuid>       │  Invalida refresh token no banco
+  │◄── 204 No Content                   │
+  │    Set-Cookie: refreshToken=;Max-Age=0│
 ```
 
 ---
@@ -260,9 +284,11 @@ Cliente                       Servidor
 - **Senhas** armazenadas com hash **BCrypt**
 - **Access token** JWT assinado com HMAC-SHA256, expiração configurável (padrão: 2 horas)
 - **Refresh token** armazenado no banco de dados com expiração configurável (padrão: 7 dias); utiliza estratégia de **rotação** — a cada uso um novo token é gerado e o anterior é deletado
+- **Refresh token via cookie HttpOnly** — nunca exposto ao JavaScript; flags `Secure`, `SameSite=Lax`, path restrito a `/auth`
 - **Sessão stateless** — Spring Security configurado com `SessionCreationPolicy.STATELESS`
-- **CSRF** desabilitado (adequado para APIs REST stateless)
-- Rotas públicas: `/auth/login`, `/auth/register`, `/auth/refresh`, `/v3/api-docs/**`, `/swagger-ui/**`
+- **CSRF** desabilitado (adequado para APIs REST stateless com cookie SameSite)
+- **CORS** configurável via `app.cors.allowed-origins`; `allowCredentials=true` para suportar envio de cookies
+- Rotas públicas: `/auth/login`, `/auth/register`, `/auth/refresh`, `/auth/logout`, `/v3/api-docs/**`, `/swagger-ui/**`
 - Todas as demais rotas exigem autenticação
 
 ---
@@ -314,4 +340,19 @@ Com a aplicação em execução, acesse:
 - **OpenAPI JSON:** [http://localhost:8081/v3/api-docs](http://localhost:8081/v3/api-docs)
 
 Para testar endpoints protegidos no Swagger UI, clique em **Authorize** e informe o *access token* obtido no login.
+
+> **Nota:** O fluxo de cookie HttpOnly não funciona diretamente pelo Swagger UI. Use uma ferramenta como Postman ou curl para testar o ciclo completo de refresh/logout.
+
+---
+
+## Docker
+
+A aplicação inclui `Dockerfile` e `docker-compose.yml` para execução conteinerizada.
+
+```bash
+# Subir a aplicação e o banco PostgreSQL
+docker compose up --build -d
+```
+
+O `docker-compose.yml` sobe o banco PostgreSQL junto com a aplicação. A variável `JWT_SECRET` pode ser configurada no arquivo ou passada como variável de ambiente.
 
