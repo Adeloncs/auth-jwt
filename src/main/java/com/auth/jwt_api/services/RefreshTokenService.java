@@ -7,7 +7,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import com.auth.jwt_api.dtos.LoginResponseDTO;
 import com.auth.jwt_api.exceptions.InvalidRefreshTokenException;
 import com.auth.jwt_api.models.RefreshToken;
 import com.auth.jwt_api.models.User;
@@ -43,7 +42,7 @@ public class RefreshTokenService {
     }
 
     @Transactional
-    public LoginResponseDTO rotateRefreshToken(String token) {
+    public AuthService.LoginResult rotateRefreshToken(String token, long expiresInSeconds) {
         RefreshToken existing = refreshTokenRepository.findByToken(token)
                 .orElseThrow(InvalidRefreshTokenException::new);
 
@@ -59,6 +58,11 @@ public class RefreshTokenService {
         RefreshToken newRefreshToken = createRefreshToken(user);
         String newAccessToken = tokenService.generateToken(user);
 
-        return new LoginResponseDTO(newAccessToken, newRefreshToken.getToken());
+        return new AuthService.LoginResult(newAccessToken, newRefreshToken.getToken(), expiresInSeconds);
+    }
+
+    @Transactional
+    public void deleteByToken(String token) {
+        refreshTokenRepository.findByToken(token).ifPresent(refreshTokenRepository::delete);
     }
 }
