@@ -12,6 +12,8 @@ import org.springframework.web.bind.MethodArgumentNotValidException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
 import org.springframework.web.bind.annotation.RestControllerAdvice;
 
+import jakarta.servlet.http.HttpServletResponse;
+
 @RestControllerAdvice
 public class GlobalExceptionHandler {
 
@@ -58,6 +60,17 @@ public class GlobalExceptionHandler {
                 HttpStatus.FORBIDDEN, "You do not have permission to access this resource");
         problemDetail.setTitle("Forbidden");
         problemDetail.setType(URI.create("about:blank"));
+        return problemDetail;
+    }
+
+    @ExceptionHandler(TooManyRequestsException.class)
+    public ProblemDetail handleTooManyRequests(TooManyRequestsException ex, HttpServletResponse response) {
+        response.setHeader("Retry-After", String.valueOf(ex.getRetryAfterSeconds()));
+        ProblemDetail problemDetail = ProblemDetail.forStatusAndDetail(
+                HttpStatus.TOO_MANY_REQUESTS, "Too many login attempts. Please try again later.");
+        problemDetail.setTitle("Too Many Requests");
+        problemDetail.setType(URI.create("about:blank"));
+        problemDetail.setProperty("retryAfter", ex.getRetryAfterSeconds());
         return problemDetail;
     }
 
