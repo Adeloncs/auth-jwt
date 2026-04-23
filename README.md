@@ -34,6 +34,7 @@ API REST de autenticação stateless construída com **Spring Boot 4**, **Java 2
 | PostgreSQL | — |
 | H2 Database (testes) | — |
 | Springdoc OpenAPI (Swagger) | 3.0.3 |
+| Bucket4j | 8.10.1 |
 | Lombok | 1.18.38 |
 | Maven | — |
 
@@ -47,6 +48,7 @@ API REST de autenticação stateless construída com **Spring Boot 4**, **Java 2
 - **Logout** com invalidação do refresh token e limpeza do cookie
 - **Refresh token via cookie HttpOnly** — protegido contra XSS; nunca exposto ao JavaScript
 - **Autenticação stateless** — sem sessão no servidor, baseada exclusivamente em JWT
+- **Rate limiting** no endpoint de login — limite de tentativas por IP via Bucket4j, com resposta `429 Too Many Requests` e header `Retry-After`
 - **CORS configurável** para integração com frontends
 - **Controle de acesso por papéis** — `ROLE_USER` e `ROLE_ADMIN`
 - **Auditoria automática** de criação e última modificação nos registros de usuário (`createdAt`, `updatedAt`)
@@ -73,6 +75,7 @@ src/main/java/com/auth/jwt_api/
 │   ├── GlobalExceptionHandler.java   # @RestControllerAdvice — tratamento centralizado
 │   ├── InvalidCredentialsException.java
 │   ├── InvalidRefreshTokenException.java
+│   ├── TooManyRequestsException.java  # Exceção de rate limit (429)
 │   └── UserAlreadyExistsException.java
 ├── models/
 │   ├── RefreshToken.java             # Entidade de refresh token (UUID, expiração, usuário)
@@ -84,6 +87,8 @@ src/main/java/com/auth/jwt_api/
 ├── security/
 │   ├── CustomAccessDeniedHandler.java       # 403 Forbidden personalizado
 │   ├── CustomAuthenticationEntryPoint.java  # 401 Unauthorized personalizado
+│   ├── RateLimiterService.java              # Buckets por IP (Bucket4j)
+│   ├── RateLimitingFilter.java             # Filtro de rate limit em /auth/login
 │   ├── SecurityConfig.java                  # Configuração do Spring Security
 │   ├── SecurityFilter.java                  # Filtro JWT (OncePerRequestFilter)
 │   └── TokenService.java                    # Geração e validação de JWT
@@ -130,6 +135,10 @@ api.security.token.refresh-expiration=604800000 # 7 dias (em ms)
 
 # CORS (separar múltiplas origens por vírgula)
 app.cors.allowed-origins=http://localhost:3000
+
+# Rate Limiting (endpoint /auth/login)
+rate-limit.capacity=5          # máximo de requisições por janela
+rate-limit.refill-minutes=5    # janela de recarga (em minutos)
 
 server.port=8081
 ```
@@ -286,6 +295,7 @@ Cliente                              Servidor
 - **Refresh token** armazenado no banco de dados com expiração configurável (padrão: 7 dias); utiliza estratégia de **rotação** — a cada uso um novo token é gerado e o anterior é deletado
 - **Refresh token via cookie HttpOnly** — nunca exposto ao JavaScript; flags `Secure`, `SameSite=Lax`, path restrito a `/auth`
 - **Sessão stateless** — Spring Security configurado com `SessionCreationPolicy.STATELESS`
+- **Rate limiting** no endpoint de login — máximo de 5 tentativas por IP em janelas de 5 minutos (configurável); retorna `429 Too Many Requests` com header `Retry-After` ao exceder o limite
 - **CSRF** desabilitado (adequado para APIs REST stateless com cookie SameSite)
 - **CORS** configurável via `app.cors.allowed-origins`; `allowCredentials=true` para suportar envio de cookies
 - Rotas públicas: `/auth/login`, `/auth/register`, `/auth/refresh`, `/auth/logout`, `/v3/api-docs/**`, `/swagger-ui/**`
@@ -314,6 +324,7 @@ A API utiliza o padrão [RFC 9457 — Problem Details](https://www.rfc-editor.or
 | E-mail já cadastrado | `409 Conflict` |
 | Campos obrigatórios ausentes/inválidos | `400 Bad Request` |
 | Recurso sem permissão de acesso | `403 Forbidden` |
+| Muitas tentativas de login (rate limit) | `429 Too Many Requests` |
 | Erro interno inesperado | `500 Internal Server Error` |
 
 ---
@@ -321,6 +332,14 @@ A API utiliza o padrão [RFC 9457 — Problem Details](https://www.rfc-editor.or
 ## Testes
 
 Os testes utilizam banco de dados **H2 em memória** e são configurados pelo perfil `test` (`src/test/resources/application-test.properties`).
+
+| Arquivo de teste | Cobertura |
+|---|---|
+| `AuthControllerTest` | Endpoints de login, registro, refresh e logout |
+| `AuthServiceTest` | Lógica de autenticação e registro |
+| `TokenServiceTest` | Geração e validação de JWT |
+| `RateLimiterServiceTest` | Lógica de consumo de tokens (Bucket4j) |
+| `RateLimitingIntegrationTest` | Comportamento do filtro de rate limit em `/auth/login` |
 
 ```bash
 # Executar todos os testes
