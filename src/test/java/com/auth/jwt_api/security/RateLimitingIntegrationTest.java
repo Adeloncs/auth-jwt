@@ -22,7 +22,6 @@ import org.springframework.web.context.WebApplicationContext;
 
 import com.auth.jwt_api.exceptions.InvalidCredentialsException;
 import com.auth.jwt_api.services.AuthService;
-import com.auth.jwt_api.services.RefreshTokenService;
 
 @SpringBootTest
 @ActiveProfiles("test")
@@ -33,9 +32,6 @@ class RateLimitingIntegrationTest {
 
     @MockitoBean
     private AuthService authService;
-
-    @MockitoBean
-    private RefreshTokenService refreshTokenService;
 
     private MockMvc mockMvc;
 
